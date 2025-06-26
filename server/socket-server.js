@@ -1,14 +1,26 @@
 const { createServer } = require('http');
 const { Server } = require('socket.io');
+const path = require('path');
 
 const httpServer = createServer();
+
+// Enhanced CORS configuration
 const io = new Server(httpServer, {
   cors: {
-    origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
+    origin: [
+      "http://localhost:3000", 
+      "http://127.0.0.1:3000",
+      "http://localhost:3001",
+      "http://127.0.0.1:3001"
+    ],
     methods: ["GET", "POST"],
-    credentials: true
+    credentials: true,
+    allowedHeaders: ["*"]
   },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 // Store meeting data
@@ -24,10 +36,28 @@ const cleanupMeeting = (meetingId) => {
   }
 };
 
+// Helper function to broadcast to meeting
+const broadcastToMeeting = (meetingId, event, data, excludeSocket = null) => {
+  const meeting = meetings.get(meetingId);
+  if (!meeting) return;
+
+  meeting.participants.forEach(participantId => {
+    const socket = io.sockets.sockets.get(participantId);
+    if (socket && socket !== excludeSocket) {
+      socket.emit(event, data);
+    }
+  });
+};
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
+  // Send connection confirmation
+  socket.emit('connected', { socketId: socket.id });
+
   socket.on('join-meeting', ({ meetingId, userName }) => {
+    console.log(`${userName} attempting to join meeting ${meetingId}`);
+    
     socket.join(meetingId);
     
     // Store participant info
@@ -53,6 +83,7 @@ io.on('connection', (socket) => {
         screenShareParticipant: null
       });
       participant.isHost = true;
+      console.log(`Meeting ${meetingId} created with host ${userName}`);
     } else {
       const meeting = meetings.get(meetingId);
       meeting.participants.add(socket.id);
@@ -77,12 +108,21 @@ io.on('connection', (socket) => {
     // Send chat history to new user
     socket.emit('chat-history', meeting.messages);
 
+    // Send join confirmation
+    socket.emit('join-confirmed', { 
+      meetingId, 
+      participantId: socket.id,
+      isHost: participant.isHost 
+    });
+
     console.log(`${userName} joined meeting ${meetingId} (${meeting.participants.size} participants)`);
   });
 
   socket.on('leave-meeting', ({ meetingId }) => {
     const participant = participants.get(socket.id);
     if (!participant) return;
+
+    console.log(`${participant.name} leaving meeting ${meetingId}`);
 
     socket.leave(meetingId);
     socket.to(meetingId).emit('user-left', socket.id);
@@ -106,18 +146,25 @@ io.on('connection', (socket) => {
     console.log(`${participant.name} left meeting ${meetingId}`);
   });
 
-  // Chat functionality
+  // Enhanced chat functionality
   socket.on('chat-message', ({ meetingId, message }) => {
+    console.log(`Chat message in ${meetingId} from ${message.sender}: ${message.message}`);
+    
     const meeting = meetings.get(meetingId);
     if (meeting) {
       const messageWithTimestamp = {
         ...message,
-        timestamp: new Date()
+        timestamp: new Date(),
+        id: message.id || Date.now().toString()
       };
+      
       meeting.messages.push(messageWithTimestamp);
       
-      // Broadcast to all participants including sender
+      // Broadcast to all participants in the meeting
       io.to(meetingId).emit('chat-message', messageWithTimestamp);
+      console.log(`Message broadcasted to ${meeting.participants.size} participants`);
+    } else {
+      console.error(`Meeting ${meetingId} not found for chat message`);
     }
   });
 
@@ -129,6 +176,7 @@ io.on('connection', (socket) => {
         message.message = newText;
         message.isEdited = true;
         io.to(meetingId).emit('message-edited', { messageId, newText });
+        console.log(`Message ${messageId} edited in meeting ${meetingId}`);
       }
     }
   });
@@ -143,6 +191,7 @@ io.on('connection', (socket) => {
       if (messageIndex !== -1) {
         meeting.messages.splice(messageIndex, 1);
         io.to(meetingId).emit('message-deleted', messageId);
+        console.log(`Message ${messageId} deleted in meeting ${meetingId}`);
       }
     }
   });
@@ -156,7 +205,7 @@ io.on('connection', (socket) => {
     socket.to(meetingId).emit('user-stopped-typing', userName);
   });
 
-  // Media controls
+  // Enhanced media controls
   socket.on('toggle-audio', ({ meetingId, isMuted }) => {
     const participant = participants.get(socket.id);
     if (participant) {
@@ -165,6 +214,7 @@ io.on('connection', (socket) => {
         participantId: socket.id,
         isMuted
       });
+      console.log(`${participant.name} ${isMuted ? 'muted' : 'unmuted'} audio`);
     }
   });
 
@@ -176,18 +226,28 @@ io.on('connection', (socket) => {
         participantId: socket.id,
         isVideoOff
       });
+      console.log(`${participant.name} ${isVideoOff ? 'turned off' : 'turned on'} video`);
     }
   });
 
-  // Screen sharing
+  // Enhanced screen sharing
   socket.on('start-screen-share', ({ meetingId, userName }) => {
     const meeting = meetings.get(meetingId);
     if (meeting) {
+      // Stop any existing screen share
+      if (meeting.screenShareParticipant && meeting.screenShareParticipant !== socket.id) {
+        const existingSharer = participants.get(meeting.screenShareParticipant);
+        if (existingSharer) {
+          io.to(meeting.screenShareParticipant).emit('force-stop-screen-share');
+        }
+      }
+      
       meeting.screenShareParticipant = socket.id;
       socket.to(meetingId).emit('screen-share-started', {
         participantId: socket.id,
         participantName: userName
       });
+      console.log(`${userName} started screen sharing in meeting ${meetingId}`);
     }
   });
 
@@ -198,11 +258,15 @@ io.on('connection', (socket) => {
       socket.to(meetingId).emit('screen-share-stopped', {
         participantId: socket.id
       });
+      
+      const participant = participants.get(socket.id);
+      console.log(`${participant?.name || 'Unknown'} stopped screen sharing in meeting ${meetingId}`);
     }
   });
 
-  // WebRTC signaling
+  // WebRTC signaling with enhanced error handling
   socket.on('offer', ({ meetingId, offer, targetId }) => {
+    console.log(`WebRTC offer from ${socket.id} to ${targetId} in meeting ${meetingId}`);
     socket.to(targetId).emit('offer', {
       offer,
       senderId: socket.id
@@ -210,6 +274,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('answer', ({ meetingId, answer, targetId }) => {
+    console.log(`WebRTC answer from ${socket.id} to ${targetId} in meeting ${meetingId}`);
     socket.to(targetId).emit('answer', {
       answer,
       senderId: socket.id
@@ -217,14 +282,22 @@ io.on('connection', (socket) => {
   });
 
   socket.on('ice-candidate', ({ meetingId, candidate, targetId }) => {
+    console.log(`ICE candidate from ${socket.id} to ${targetId} in meeting ${meetingId}`);
     socket.to(targetId).emit('ice-candidate', {
       candidate,
       senderId: socket.id
     });
   });
 
-  // Handle disconnect
-  socket.on('disconnect', () => {
+  // Enhanced heartbeat system
+  socket.on('ping', () => {
+    socket.emit('pong', { timestamp: Date.now() });
+  });
+
+  // Handle disconnect with enhanced cleanup
+  socket.on('disconnect', (reason) => {
+    console.log(`Socket ${socket.id} disconnected: ${reason}`);
+    
     const participant = participants.get(socket.id);
     if (participant) {
       const meetingId = participant.meetingId;
@@ -249,13 +322,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Heartbeat to keep connection alive
-  socket.on('ping', () => {
-    socket.emit('pong');
+  // Error handling
+  socket.on('error', (error) => {
+    console.error('Socket error:', error);
   });
 });
 
-// Periodic cleanup of old meetings (older than 24 hours)
+// Enhanced periodic cleanup
 setInterval(() => {
   const now = new Date();
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -266,27 +339,54 @@ setInterval(() => {
       console.log(`Cleaned up old meeting: ${meetingId}`);
     }
   }
+  
+  // Log current status
+  console.log(`Active meetings: ${meetings.size}, Active participants: ${participants.size}`);
 }, 60 * 60 * 1000); // Run every hour
 
+// Server status logging
+setInterval(() => {
+  console.log(`Server status - Meetings: ${meetings.size}, Participants: ${participants.size}, Connected sockets: ${io.engine.clientsCount}`);
+}, 5 * 60 * 1000); // Every 5 minutes
+
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Socket.IO server running on port ${PORT}`);
   console.log(`CORS enabled for: http://localhost:3000, http://127.0.0.1:3000`);
+  console.log(`Server ready to accept connections`);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  httpServer.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+// Enhanced graceful shutdown
+const gracefulShutdown = () => {
+  console.log('Shutting down gracefully...');
+  
+  // Notify all connected clients
+  io.emit('server-shutdown', { message: 'Server is shutting down' });
+  
+  // Close all connections
+  io.close(() => {
+    console.log('All socket connections closed');
+    httpServer.close(() => {
+      console.log('HTTP server closed');
+      process.exit(0);
+    });
   });
+  
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    console.log('Force exit');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
 });
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  httpServer.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });

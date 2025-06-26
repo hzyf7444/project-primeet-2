@@ -10,7 +10,7 @@ interface ScreenShareProps {
 }
 
 export function ScreenShare({ stream, participantName }: ScreenShareProps) {
-  const videoRef = useRef<HTMLVideoVideo>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     if (videoRef.current && stream) {
