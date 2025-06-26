@@ -11,7 +11,10 @@ import {
   MoreVertical,
   Edit,
   Trash2,
-  Reply
+  Reply,
+  File,
+  Image,
+  FileText
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,6 +25,7 @@ import { Separator } from '@/components/ui/separator';
 import { formatDistanceToNow } from 'date-fns';
 import { tr } from 'date-fns/locale';
 import { Socket } from 'socket.io-client';
+import { toast } from 'sonner';
 
 interface ChatMessage {
   id: string;
@@ -32,6 +36,7 @@ interface ChatMessage {
   fileUrl?: string;
   fileName?: string;
   fileSize?: number;
+  fileType?: string;
   replyTo?: string;
   isEdited?: boolean;
 }
@@ -51,6 +56,7 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -60,7 +66,7 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
     if (!socket) return;
 
     socket.on('chat-message', (message: ChatMessage) => {
-      setMessages(prev => [...prev, message]);
+      setMessages(prev => [...prev, { ...message, timestamp: new Date(message.timestamp) }]);
     });
 
     socket.on('message-edited', ({ messageId, newText }: { messageId: string, newText: string }) => {
@@ -76,11 +82,17 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
     });
 
     socket.on('user-typing', (username: string) => {
-      setTypingUsers(prev => [...prev.filter(u => u !== username), username]);
+      if (username !== userName) {
+        setTypingUsers(prev => [...prev.filter(u => u !== username), username]);
+      }
     });
 
     socket.on('user-stopped-typing', (username: string) => {
       setTypingUsers(prev => prev.filter(u => u !== username));
+    });
+
+    socket.on('chat-history', (history: ChatMessage[]) => {
+      setMessages(history.map(msg => ({ ...msg, timestamp: new Date(msg.timestamp) })));
     });
 
     return () => {
@@ -89,8 +101,9 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
       socket.off('message-deleted');
       socket.off('user-typing');
       socket.off('user-stopped-typing');
+      socket.off('chat-history');
     };
-  }, [socket]);
+  }, [socket, userName]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -158,6 +171,14 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
     const file = event.target.files?.[0];
     if (!file || !socket) return;
 
+    // Check file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('Dosya boyutu 10MB\'dan büyük olamaz');
+      return;
+    }
+
+    setIsUploading(true);
+
     const formData = new FormData();
     formData.append('file', file);
     formData.append('meetingId', meetingId);
@@ -179,13 +200,24 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
           type: 'file',
           fileUrl,
           fileName: file.name,
-          fileSize: file.size
+          fileSize: file.size,
+          fileType: file.type
         };
 
         socket.emit('chat-message', { meetingId, message });
+        toast.success('Dosya başarıyla yüklendi');
+      } else {
+        throw new Error('Upload failed');
       }
     } catch (error) {
       console.error('File upload failed:', error);
+      toast.error('Dosya yüklenemedi. Lütfen tekrar deneyin.');
+    } finally {
+      setIsUploading(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -197,12 +229,33 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
+  const getFileIcon = (fileType?: string) => {
+    if (!fileType) return <File className="w-4 h-4" />;
+    
+    if (fileType.startsWith('image/')) return <Image className="w-4 h-4" />;
+    if (fileType.includes('pdf') || fileType.includes('document')) return <FileText className="w-4 h-4" />;
+    return <File className="w-4 h-4" />;
+  };
+
+  const handleDownloadFile = (fileUrl: string, fileName: string) => {
+    const link = document.createElement('a');
+    link.href = fileUrl;
+    link.download = fileName;
+    link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col bg-white dark:bg-gray-800">
       {/* Header */}
-      <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
         <div className="flex items-center justify-between">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Sohbet</h3>
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Sohbet</h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400">{messages.length} mesaj</p>
+          </div>
           <Button variant="ghost" size="icon" onClick={onClose}>
             <X className="w-4 h-4" />
           </Button>
@@ -223,7 +276,7 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
                   message.sender === userName ? 'flex-row-reverse' : 'flex-row'
                 }`}
               >
-                <Avatar className="w-8 h-8">
+                <Avatar className="w-8 h-8 flex-shrink-0">
                   <AvatarFallback className="bg-blue-600 text-white text-xs">
                     {message.sender.charAt(0).toUpperCase()}
                   </AvatarFallback>
@@ -289,10 +342,12 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
                     ) : (
                       <>
                         {message.type === 'file' ? (
-                          <div className="flex items-center gap-2">
-                            <Paperclip className="w-4 h-4" />
-                            <div>
-                              <p className="text-sm font-medium">{message.fileName}</p>
+                          <div className="flex items-center gap-3 min-w-[200px]">
+                            <div className="flex-shrink-0">
+                              {getFileIcon(message.fileType)}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium truncate">{message.fileName}</p>
                               <p className="text-xs opacity-70">
                                 {message.fileSize && formatFileSize(message.fileSize)}
                               </p>
@@ -301,19 +356,20 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
                               size="sm"
                               variant="ghost"
                               onClick={() => {
-                                if (message.fileUrl) {
-                                  window.open(message.fileUrl, '_blank');
+                                if (message.fileUrl && message.fileName) {
+                                  handleDownloadFile(message.fileUrl, message.fileName);
                                 }
                               }}
+                              className="flex-shrink-0 hover:bg-white/20"
                             >
                               <Download className="w-4 h-4" />
                             </Button>
                           </div>
                         ) : (
-                          <p className="text-sm whitespace-pre-wrap">{message.message}</p>
+                          <p className="text-sm whitespace-pre-wrap break-words">{message.message}</p>
                         )}
 
-                        {message.sender === userName && (
+                        {message.sender === userName && message.type === 'text' && (
                           <div className="absolute -right-8 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
                             <Button
                               variant="ghost"
@@ -322,6 +378,7 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
                                 setEditingMessage(message.id);
                                 setEditText(message.message);
                               }}
+                              className="h-6 w-6 p-0"
                             >
                               <Edit className="w-3 h-3" />
                             </Button>
@@ -335,7 +392,7 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="mt-1 text-xs"
+                      className="mt-1 text-xs h-6"
                       onClick={() => setReplyTo(message)}
                     >
                       <Reply className="w-3 h-3 mr-1" />
@@ -370,7 +427,7 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
       {replyTo && (
         <div className="p-2 mx-4 bg-gray-50 dark:bg-gray-800 rounded-lg border-l-2 border-blue-500">
           <div className="flex justify-between items-start">
-            <div>
+            <div className="flex-1 min-w-0">
               <p className="text-xs text-gray-600 dark:text-gray-400">{replyTo.sender} kullanıcısına yanıt</p>
               <p className="text-sm text-gray-800 dark:text-gray-200 truncate">{replyTo.message}</p>
             </div>
@@ -378,6 +435,7 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
               variant="ghost"
               size="sm"
               onClick={() => setReplyTo(null)}
+              className="h-6 w-6 p-0 flex-shrink-0"
             >
               <X className="w-3 h-3" />
             </Button>
@@ -386,14 +444,20 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
       )}
 
       {/* Input */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-700">
+      <div className="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
         <div className="flex items-center gap-2">
           <Button
             variant="ghost"
             size="icon"
             onClick={() => fileInputRef.current?.click()}
+            disabled={isUploading}
+            className="flex-shrink-0"
           >
-            <Paperclip className="w-4 h-4" />
+            {isUploading ? (
+              <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <Paperclip className="w-4 h-4" />
+            )}
           </Button>
 
           <div className="flex-1 relative">
@@ -405,16 +469,18 @@ export function ChatPanel({ meetingId, userName, socket, onClose }: ChatPanelPro
                 handleTyping();
               }}
               onKeyPress={(e) => {
-                if (e.key === 'Enter') {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
                   handleSendMessage();
                 }
               }}
               className="pr-12"
+              disabled={isUploading}
             />
             <Button
               size="sm"
               onClick={handleSendMessage}
-              disabled={!newMessage.trim()}
+              disabled={!newMessage.trim() || isUploading}
               className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 p-0"
             >
               <Send className="w-4 h-4" />

@@ -23,7 +23,8 @@ import {
   PenTool,
   FileText,
   Copy,
-  UserPlus
+  UserPlus,
+  Clock
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -38,6 +39,7 @@ import { ParticipantsList } from '@/components/meeting/participants-list';
 import { ScreenShare } from '@/components/meeting/screen-share';
 import { Whiteboard } from '@/components/meeting/whiteboard';
 import { MeetingControls } from '@/components/meeting/meeting-controls';
+import { MeetingTimer } from '@/components/meeting/meeting-timer';
 import { useSocket } from '@/hooks/use-socket';
 import { useWebRTC } from '@/hooks/use-webrtc';
 
@@ -48,6 +50,7 @@ interface Participant {
   isMuted: boolean;
   isVideoOff: boolean;
   joinedAt: Date;
+  stream?: MediaStream;
 }
 
 export default function MeetingRoom() {
@@ -66,6 +69,8 @@ export default function MeetingRoom() {
   const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [meetingStartTime, setMeetingStartTime] = useState<Date | null>(null);
+  const [screenShareParticipant, setScreenShareParticipant] = useState<string | null>(null);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const { socket, isConnected } = useSocket(process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001');
@@ -78,7 +83,9 @@ export default function MeetingRoom() {
     startAudio, 
     stopAudio,
     startScreenShare,
-    stopScreenShare
+    stopScreenShare,
+    addRemoteStream,
+    removeRemoteStream
   } = useWebRTC();
 
   useEffect(() => {
@@ -95,6 +102,7 @@ export default function MeetingRoom() {
       socket.emit('join-meeting', { meetingId, userName });
       setIsJoined(true);
       setConnectionStatus('connected');
+      setMeetingStartTime(new Date());
     }
   }, [socket, userName, meetingId, isJoined]);
 
@@ -114,18 +122,61 @@ export default function MeetingRoom() {
         }
         return prev.filter(p => p.id !== participantId);
       });
+      removeRemoteStream(participantId);
     });
 
     socket.on('participants-list', (participantsList: Participant[]) => {
       setParticipants(participantsList);
     });
 
+    socket.on('participant-audio-changed', ({ participantId, isMuted }) => {
+      setParticipants(prev => prev.map(p => 
+        p.id === participantId ? { ...p, isMuted } : p
+      ));
+    });
+
+    socket.on('participant-video-changed', ({ participantId, isVideoOff }) => {
+      setParticipants(prev => prev.map(p => 
+        p.id === participantId ? { ...p, isVideoOff } : p
+      ));
+    });
+
+    socket.on('screen-share-started', ({ participantId, participantName }) => {
+      setScreenShareParticipant(participantId);
+      toast.info(`${participantName} ekran paylaşımı başlattı`);
+    });
+
+    socket.on('screen-share-stopped', ({ participantId }) => {
+      setScreenShareParticipant(null);
+      toast.info('Ekran paylaşımı durduruldu');
+    });
+
+    // WebRTC signaling
+    socket.on('offer', async ({ offer, senderId }) => {
+      // Handle WebRTC offer
+    });
+
+    socket.on('answer', async ({ answer, senderId }) => {
+      // Handle WebRTC answer
+    });
+
+    socket.on('ice-candidate', async ({ candidate, senderId }) => {
+      // Handle ICE candidate
+    });
+
     return () => {
       socket.off('user-joined');
       socket.off('user-left');
       socket.off('participants-list');
+      socket.off('participant-audio-changed');
+      socket.off('participant-video-changed');
+      socket.off('screen-share-started');
+      socket.off('screen-share-stopped');
+      socket.off('offer');
+      socket.off('answer');
+      socket.off('ice-candidate');
     };
-  }, [socket]);
+  }, [socket, removeRemoteStream]);
 
   useEffect(() => {
     if (localStream && localVideoRef.current) {
@@ -160,14 +211,14 @@ export default function MeetingRoom() {
       if (isScreenSharing) {
         stopScreenShare();
         setIsScreenSharing(false);
+        socket?.emit('stop-screen-share', { meetingId });
         toast.success('Ekran paylaşımı durduruldu');
       } else {
         await startScreenShare();
         setIsScreenSharing(true);
+        socket?.emit('start-screen-share', { meetingId, userName });
         toast.success('Ekran paylaşımı başlatıldı');
       }
-      
-      socket?.emit('toggle-screen-share', { meetingId, isScreenSharing: !isScreenSharing });
     } catch (error) {
       toast.error('Ekran paylaşımı başlatılamadı');
     }
@@ -214,12 +265,16 @@ export default function MeetingRoom() {
     <div className="min-h-screen bg-gray-900 relative overflow-hidden">
       <Toaster />
       
-      {/* Meeting Header */}
+      {/* Meeting Header - Fixed positioning to avoid overlap */}
       <motion.header 
-        className="absolute top-0 left-0 right-0 z-30 p-4 bg-gradient-to-b from-black/50 to-transparent"
+        className="fixed top-0 left-0 right-0 z-40 p-4 bg-gradient-to-b from-black/70 to-transparent"
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3 }}
+        style={{ 
+          right: isChatOpen || isParticipantsOpen ? '320px' : '0',
+          transition: 'right 0.3s ease-in-out'
+        }}
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -269,12 +324,40 @@ export default function MeetingRoom() {
         </div>
       </motion.header>
 
+      {/* Meeting Timer - Fixed position bottom left */}
+      {meetingStartTime && (
+        <MeetingTimer 
+          startTime={meetingStartTime}
+          className="fixed bottom-6 left-6 z-30"
+        />
+      )}
+
       {/* Main Content Area */}
-      <div className="flex h-screen">
+      <div className="flex h-screen pt-20 pb-24">
         {/* Video Grid */}
         <div className="flex-1 relative">
-          {isScreenSharing && screenStream ? (
-            <ScreenShare stream={screenStream} />
+          {screenShareParticipant && screenStream ? (
+            <div className="relative h-full">
+              {/* Screen Share Display */}
+              <div className="absolute inset-0 flex items-center justify-center bg-black">
+                <ScreenShare 
+                  stream={screenStream} 
+                  participantName={participants.find(p => p.id === screenShareParticipant)?.name || 'Unknown'}
+                />
+              </div>
+              
+              {/* Small video grid overlay */}
+              <div className="absolute top-4 right-4 w-80 h-60 bg-gray-800 rounded-lg overflow-hidden">
+                <VideoGrid 
+                  localStream={localStream}
+                  remoteStreams={remoteStreams}
+                  participants={participants}
+                  userName={userName}
+                  isVideoOff={isVideoOff}
+                  isCompact={true}
+                />
+              </div>
+            </div>
           ) : (
             <VideoGrid 
               localStream={localStream}
@@ -282,6 +365,7 @@ export default function MeetingRoom() {
               participants={participants}
               userName={userName}
               isVideoOff={isVideoOff}
+              maxParticipants={10}
             />
           )}
 
@@ -292,7 +376,7 @@ export default function MeetingRoom() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-black/50 z-20"
+                className="absolute inset-0 bg-black/50 z-30"
               >
                 <Whiteboard onClose={() => setIsWhiteboardOpen(false)} />
               </motion.div>
@@ -300,7 +384,7 @@ export default function MeetingRoom() {
           </AnimatePresence>
         </div>
 
-        {/* Side Panels */}
+        {/* Side Panels - Fixed width and positioning */}
         <AnimatePresence>
           {isChatOpen && (
             <motion.div
@@ -308,7 +392,8 @@ export default function MeetingRoom() {
               animate={{ width: 320, opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.3 }}
-              className="bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 overflow-hidden"
+              className="fixed right-0 top-0 bottom-0 z-50 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 overflow-hidden"
+              style={{ width: '320px' }}
             >
               <ChatPanel 
                 meetingId={meetingId}
@@ -319,13 +404,14 @@ export default function MeetingRoom() {
             </motion.div>
           )}
 
-          {isParticipantsOpen && (
+          {isParticipantsOpen && !isChatOpen && (
             <motion.div
               initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 280, opacity: 1 }}
+              animate={{ width: 320, opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.3 }}
-              className="bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 overflow-hidden"
+              className="fixed right-0 top-0 bottom-0 z-50 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 overflow-hidden"
+              style={{ width: '320px' }}
             >
               <ParticipantsList 
                 participants={participants}
@@ -337,21 +423,29 @@ export default function MeetingRoom() {
         </AnimatePresence>
       </div>
 
-      {/* Meeting Controls */}
-      <MeetingControls
-        isMuted={isMuted}
-        isVideoOff={isVideoOff}
-        isScreenSharing={isScreenSharing}
-        isChatOpen={isChatOpen}
-        isParticipantsOpen={isParticipantsOpen}
-        onToggleMute={handleToggleMute}
-        onToggleVideo={handleToggleVideo}
-        onToggleScreenShare={handleToggleScreenShare}
-        onToggleChat={() => setIsChatOpen(!isChatOpen)}
-        onToggleParticipants={() => setIsParticipantsOpen(!isParticipantsOpen)}
-        onToggleWhiteboard={() => setIsWhiteboardOpen(!isWhiteboardOpen)}
-        onLeaveMeeting={handleLeaveMeeting}
-      />
+      {/* Meeting Controls - Fixed position at bottom center */}
+      <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50">
+        <MeetingControls
+          isMuted={isMuted}
+          isVideoOff={isVideoOff}
+          isScreenSharing={isScreenSharing}
+          isChatOpen={isChatOpen}
+          isParticipantsOpen={isParticipantsOpen}
+          onToggleMute={handleToggleMute}
+          onToggleVideo={handleToggleVideo}
+          onToggleScreenShare={handleToggleScreenShare}
+          onToggleChat={() => {
+            setIsChatOpen(!isChatOpen);
+            if (isParticipantsOpen) setIsParticipantsOpen(false);
+          }}
+          onToggleParticipants={() => {
+            setIsParticipantsOpen(!isParticipantsOpen);
+            if (isChatOpen) setIsChatOpen(false);
+          }}
+          onToggleWhiteboard={() => setIsWhiteboardOpen(!isWhiteboardOpen)}
+          onLeaveMeeting={handleLeaveMeeting}
+        />
+      </div>
     </div>
   );
 }

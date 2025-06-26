@@ -2,14 +2,15 @@
 
 import { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Monitor } from 'lucide-react';
+import { Monitor, User } from 'lucide-react';
 
 interface ScreenShareProps {
   stream: MediaStream;
+  participantName?: string;
 }
 
-export function ScreenShare({ stream }: ScreenShareProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+export function ScreenShare({ stream, participantName }: ScreenShareProps) {
+  const videoRef = useRef<HTMLVideoVideo>(null);
 
   useEffect(() => {
     if (videoRef.current && stream) {
@@ -28,13 +29,24 @@ export function ScreenShare({ stream }: ScreenShareProps) {
         ref={videoRef}
         autoPlay
         playsInline
-        className="max-w-full max-h-full object-contain"
+        className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
       />
 
       {/* Screen Share Indicator */}
-      <div className="absolute top-4 left-4 flex items-center gap-2 px-3 py-2 bg-black/70 text-white rounded-lg">
-        <Monitor className="w-4 h-4" />
-        <span className="text-sm font-medium">Ekran Paylaşımı</span>
+      <div className="absolute top-4 left-4 flex items-center gap-2 px-4 py-2 bg-black/80 text-white rounded-lg backdrop-blur-sm">
+        <Monitor className="w-5 h-5" />
+        <div className="flex flex-col">
+          <span className="text-sm font-medium">Ekran Paylaşımı</span>
+          {participantName && (
+            <span className="text-xs text-gray-300">{participantName} tarafından</span>
+          )}
+        </div>
+      </div>
+
+      {/* Quality indicator */}
+      <div className="absolute top-4 right-4 flex items-center gap-2 px-3 py-2 bg-black/80 text-white rounded-lg backdrop-blur-sm">
+        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+        <span className="text-xs">HD</span>
       </div>
     </motion.div>
   );
